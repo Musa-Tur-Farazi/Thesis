@@ -124,3 +124,7 @@ dmypy.json
 scripts/twitter_data.json
 # Pyre type checker
 .pyre/
+
+# Ignore all PNG files except Twitter benchmark results
+*.png
+!scripts/twitter_*.png
