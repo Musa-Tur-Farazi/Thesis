@@ -15,7 +15,7 @@ from typing import List, Tuple, Dict, Any
 # Add parent directory to path to ensure we use the local package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rtreelib import Rect, RTree, RStarTree, FisherFlowRTree
+from rtreelib import Rect, RTree, RStarTree, BasicNNRTree
 from download_twitter_data import load_twitter_data
 
 # Try to import the simple parser - it's okay if it fails
@@ -28,6 +28,9 @@ except ImportError:
 # Constants for the experiment
 CAPACITY = 16  # Maximum capacity of R-tree nodes
 MAX_POINTS = 100  # Maximum number of points to use from Twitter dataset
+
+# Toggle this flag to include or exclude the (heavier) Fisher-Flow R-Tree benchmark.
+INCLUDE_FFM = False
 
 def normalize_points(points):
     """
@@ -403,65 +406,67 @@ def main():
     print("\nBuilding R-trees...")
     rtree, rtree_time = build_rtree(pts, RTree, max_entries=CAPACITY)
     rstar, rstar_time = build_rtree(pts, RStarTree, max_entries=CAPACITY)
-    ffm, ffm_time = build_rtree(pts, FisherFlowRTree, 
-                               max_entries=CAPACITY, 
-                               min_train_samples=100, 
-                               router_hidden_size=64, 
-                               router_depth=2, 
-                               router_epochs=20,
-                               router_top_k=1)
     
-    print(f"Build times (ms): Classic={rtree_time:.2f}, R*={rstar_time:.2f}, FFM={ffm_time:.2f}")
+    # Fisher-Flow benchmark disabled; build only BasicNN-augmented tree
+    bnn, bnn_time = build_rtree(pts, BasicNNRTree,
+                                max_entries=CAPACITY,
+                                min_train_samples=100,
+                                router_hidden_size=32,
+                                router_depth=1,
+                                router_epochs=10,
+                                router_top_k=1)
+    
+    print(f"Build times (ms): Classic={rtree_time:.2f}, R*={rstar_time:.2f}, BasicNN={bnn_time:.2f}")
     
     # Query trees
     print("\nQuerying trees...")
     rtree_results, rtree_query_time, rtree_hits, rtree_node_accesses = query_and_measure(rtree, all_queries)
     rstar_results, rstar_query_time, rstar_hits, rstar_node_accesses = query_and_measure(rstar, all_queries)
-    ffm_results, ffm_query_time, ffm_hits, ffm_node_accesses = query_and_measure(ffm, all_queries)
+    bnn_results, bnn_query_time, bnn_hits, bnn_node_accesses = query_and_measure(bnn, all_queries)
     
-    print(f"Query times (ms/query): Classic={rtree_query_time:.2f}, R*={rstar_query_time:.2f}, FFM={ffm_query_time:.2f}")
+    print(f"Query times (ms/query): Classic={rtree_query_time:.2f}, R*={rstar_query_time:.2f}, BasicNN={bnn_query_time:.2f}")
     
     # Print detailed query results for each tree implementation
     print("\n===== DETAILED QUERY RESULTS =====")
-    for i, ((xmin, ymin, xmax, ymax), rtree_res, rstar_res, ffm_res) in enumerate(zip(all_queries, rtree_results, rstar_results, ffm_results)):
+    for i, ((xmin, ymin, xmax, ymax), rtree_res, rstar_res, bnn_res) in enumerate(zip(all_queries, rtree_results, rstar_results, bnn_results)):
         print(f"\nQuery {i}: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
         
         # Print the result IDs from each implementation
         rtree_ids = sorted([e.data for e in rtree_res])
         rstar_ids = sorted([e.data for e in rstar_res])
-        ffm_ids = sorted([e.data for e in ffm_res])
+        bnn_ids = sorted([e.data for e in bnn_res])
         
         print(f"  Classic R-tree results: {rtree_ids}")
         print(f"  R*-tree results: {rstar_ids}")
-        print(f"  FFM-tree results: {ffm_ids}")
+        print(f"  BasicNN-tree results: {bnn_ids}")
         
         # Calculate differences between implementations
         if rtree_ids != rstar_ids:
             rstar_missing = set(rtree_ids) - set(rstar_ids)
             rstar_extra = set(rstar_ids) - set(rtree_ids)
             print(f"  R* differences: missing={rstar_missing}, extra={rstar_extra}")
-            
-        if rtree_ids != ffm_ids:
-            ffm_missing = set(rtree_ids) - set(ffm_ids)
-            ffm_extra = set(ffm_ids) - set(rtree_ids)
-            print(f"  FFM differences: missing={ffm_missing}, extra={ffm_extra}")
+        
+        if rtree_ids != bnn_ids:
+            bnn_missing = set(rtree_ids) - set(bnn_ids)
+            bnn_extra = set(bnn_ids) - set(rtree_ids)
+            print(f"  BasicNN differences: missing={bnn_missing}, extra={bnn_extra}")
     
     # Calculate query hit statistics
     rtree_total_hits = sum(rtree_hits)
     rstar_total_hits = sum(rstar_hits)
-    ffm_total_hits = sum(ffm_hits)
+    bnn_total_hits = sum(bnn_hits)
     
-    print(f"\nTotal query hits: Classic={rtree_total_hits}, R*={rstar_total_hits}, FFM={ffm_total_hits}")
+    print(f"\nTotal query hits: Classic={rtree_total_hits}, R*={rstar_total_hits}, BasicNN={bnn_total_hits}")
     
     # Report node access counts and pruning efficiency
-    print(f"\nNode accesses: Classic={rtree_node_accesses}, R*={rstar_node_accesses}, FFM={ffm_node_accesses}")
+    print(f"\nNode accesses: Classic={rtree_node_accesses}, R*={rstar_node_accesses}, BasicNN={bnn_node_accesses}")
     
     # Calculate pruning efficiency (% of nodes pruned compared to Guttman)
     total_nodes = len(list(rtree.get_nodes()))
     rstar_pruning = (1 - rstar_node_accesses / rtree_node_accesses) * 100
-    ffm_pruning = (1 - ffm_node_accesses / rtree_node_accesses) * 100
+    bnn_pruning = (1 - bnn_node_accesses / rtree_node_accesses) * 100
     
-    print(f"Pruning efficiency: R*={rstar_pruning:.2f}%, FFM={ffm_pruning:.2f}%")
+    print(f"Pruning efficiency: R*={rstar_pruning:.2f}%, BasicNN={bnn_pruning:.2f}%")
     print(f"Total tree nodes: {total_nodes}")
     
     # Show hits per query type
@@ -483,16 +488,16 @@ def main():
     print("R*-Tree vs Classic:")
     rstar_prec, rstar_rec, rstar_f1 = evaluate_accuracy(rstar_results, rtree_results)
     
-    print("\nFFM-Tree vs Classic:")
-    ffm_prec, ffm_rec, ffm_f1 = evaluate_accuracy(ffm_results, rtree_results)
+    print("\nBasicNN-Tree vs Classic:")
+    bnn_prec, bnn_rec, bnn_f1 = evaluate_accuracy(bnn_results, rtree_results)
     
     # Create visualizations
     print("\nCreating visualizations...")
     
     # Compare tree structures
     fig, _ = compare_rtree_structures(
-        [rtree, rstar, ffm],
-        ["Guttman", "R*", "Fisher-Flow"],
+        [rtree, rstar, bnn],
+        ["Guttman", "R*", "BasicNN"],
         level=1
     )
     fig.savefig("twitter_rtree_structure_comparison_level1.png")
@@ -508,7 +513,7 @@ def main():
             # Query each implementation for this rectangle
             rtree_res = list(rtree.query(rect_obj))
             rstar_res = list(rstar.query(rect_obj))
-            ffm_res = list(ffm.query(rect_obj))
+            bnn_res = list(bnn.query(rect_obj))
             
             # Visualize query results
             visualize_rtree(rtree, pts, rect, rtree_res, "Guttman RTree Query")
@@ -517,8 +522,8 @@ def main():
             visualize_rtree(rstar, pts, rect, rstar_res, "R* Tree Query")
             plt.savefig("twitter_rstar_query.png")
             
-            visualize_rtree(ffm, pts, rect, ffm_res, "Fisher-Flow RTree Query")
-            plt.savefig("twitter_ffm_query.png")
+            visualize_rtree(bnn, pts, rect, bnn_res, "BasicNN RTree Query")
+            plt.savefig("twitter_bnn_query.png")
             
             print("Saved query visualizations")
             results_found = True
@@ -535,27 +540,27 @@ def main():
     print("\nBuild Time (ms):")
     print(f"{'RTree (Guttman)':20} {rtree_time:.2f}")
     print(f"{'RStarTree':20} {rstar_time:.2f}")
-    print(f"{'FisherFlowRTree':20} {ffm_time:.2f}")
+    print(f"{'BasicNNRTree':20} {bnn_time:.2f}")
     
     print("\nQuery Time (ms/query):")
     print(f"{'RTree (Guttman)':20} {rtree_query_time:.2f}")
     print(f"{'RStarTree':20} {rstar_query_time:.2f}")
-    print(f"{'FisherFlowRTree':20} {ffm_query_time:.2f}")
+    print(f"{'BasicNNRTree':20} {bnn_query_time:.2f}")
     
     print("\nNode Accesses:")
     print(f"{'RTree (Guttman)':20} {rtree_node_accesses}")
     print(f"{'RStarTree':20} {rstar_node_accesses}")
-    print(f"{'FisherFlowRTree':20} {ffm_node_accesses}")
+    print(f"{'BasicNNRTree':20} {bnn_node_accesses}")
     
     print("\nPruning Efficiency (% nodes pruned vs Guttman):")
     print(f"{'RTree (Guttman)':20} 0.00% (reference)")
     print(f"{'RStarTree':20} {rstar_pruning:.2f}%")
-    print(f"{'FisherFlowRTree':20} {ffm_pruning:.2f}%")
+    print(f"{'BasicNNRTree':20} {bnn_pruning:.2f}%")
     
     print("\nAccuracy (vs. Guttman RTree):")
     print(f"{'RTree (Guttman)':20} precision=100.00% recall=100.00% F1=100.00% (reference)")
     print(f"{'RStarTree':20} precision={rstar_prec:.2%} recall={rstar_rec:.2%} F1={rstar_f1:.2%}")
-    print(f"{'FisherFlowRTree':20} precision={ffm_prec:.2%} recall={ffm_rec:.2%} F1={ffm_f1:.2%}")
+    print(f"{'BasicNNRTree':20} precision={bnn_prec:.2%} recall={bnn_rec:.2%} F1={bnn_f1:.2%}")
     
     print("\nTwitter benchmark complete!")
 

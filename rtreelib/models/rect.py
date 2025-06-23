@@ -43,7 +43,7 @@ class Rect:
         y1 = max(min(a.min_y, a.max_y), min(b.min_y, b.max_y))
         x2 = min(max(a.min_x, a.max_x), max(b.min_x, b.max_x))
         y2 = min(max(a.min_y, a.max_y), max(b.min_y, b.max_y))
-        return x1 <= x2 and y1 <= y2
+        return x1 < x2 and y1 < y2
 
     def get_intersection_area(self, rect: 'Rect') -> float:
         x_overlap = max(0.0, min(self.max_x, rect.max_x) - max(self.min_x, rect.min_x))

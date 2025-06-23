@@ -2,3 +2,4 @@ from .guttman import RTreeGuttman
 from .rstar import RStarTree
 from .base import insert, adjust_tree_strategy, least_area_enlargement
 from .fisherfflow import FisherFlowRTree
+from .basicnn import BasicNNRTree

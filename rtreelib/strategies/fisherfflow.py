@@ -187,15 +187,24 @@ def ffm_choose_leaf(tree: RTreeBase[T], entry: RTreeEntry[T]) -> RTreeNode[T]:
                 # Use the neural router to make traversal decisions
                 pt = entry.rect.centroid()
                 
-                # Get router prediction - set router device to CPU for inference
+                # Fast torch-only evaluation (avoids detach/NumPy conversions)
                 device = node.router[2]
-                logits = node.router[0](
-                    torch.tensor(normalize([pt]), device=device),
-                    torch.zeros((1, 1), device=device)
-                )[0].detach().cpu().numpy()
-                
-                # Simply use the best prediction without considering alternatives
-                best_idx = np.argmax(logits)
+
+                # Inline normalisation to keep allocations minimal
+                coords = torch.tensor([
+                    [(pt[0] - XMIN) / (XMAX - XMIN),
+                     (pt[1] - YMIN) / (YMAX - YMIN)]
+                ], device=device, dtype=torch.float32)
+
+                # Use cached zero-tensor if available; otherwise create and store it
+                if len(node.router) == 3:
+                    # Append a cached tensor placeholder at index 3
+                    node.router += (torch.zeros((1, 1), device=device, dtype=torch.float32),)
+                t_zero = node.router[3]
+
+                with torch.no_grad():
+                    logits = node.router[0](coords, t_zero)
+                best_idx = int(torch.argmax(logits, dim=1).item())
                 
                 # Ensure prediction is valid
                 if best_idx < len(node.entries):
