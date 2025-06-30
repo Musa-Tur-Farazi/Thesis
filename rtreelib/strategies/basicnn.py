@@ -74,7 +74,7 @@ class BasicNNRTree(FisherFlowRTree):
 
     def __init__(self, max_entries: int = DEFAULT_MAX_ENTRIES, min_entries: int = None,
                  min_train_samples: int = 200, router_hidden_size: int = 32,
-                 router_depth: int = 1, router_epochs: int = 10, router_top_k: int = 1,
+                 router_depth: int = 1, router_epochs: int = 50, router_top_k: int = 1,
                  device: str = "cpu", training_enabled: bool = True):
         super().__init__(
             max_entries=max_entries,
@@ -90,28 +90,72 @@ class BasicNNRTree(FisherFlowRTree):
 
     # Override to use simple cross-entropy instead of flow-matching training
     def _train_routers(self) -> None:  # type: ignore[override]
-        nodes_to_train = []
-        samples_trained = 0
-        for node, examples in list(self._training_buffer.items()):
-            if node in self._trained_nodes or len(examples) < self.min_train_samples or len(node.entries) <= 1:
-                continue
-            xs = np.array([ex[0] for ex in examples])
-            child_ids = [ex[1] for ex in examples]
-            # Need at least two different children to learn anything
-            if len(set(child_ids)) < 2:
-                continue
-            nodes_to_train.append((node, xs, child_ids))
-        for node, xs, child_ids in nodes_to_train:
-            try:
-                net = RouterNet(len(node.entries), self.router_hidden_size, self.router_depth)
-                ds = _BasicRouterDS(xs, child_ids)
-                loss = _train_router_basic(net, ds, epochs=self.router_epochs, device=self.device)
-                node.router = (net, self.router_top_k, self.device)
-                self._trained_nodes.add(node)
-                samples_trained += len(child_ids)
-            except Exception as e:
-                print(f"[BasicNN] training error on node {id(node)}: {e}")
-        # Clear buffer
-        self._training_buffer.clear()
-        if samples_trained:
-            print(f"[BasicNN] trained {len(nodes_to_train)} routers with {samples_trained} samples (avg CE loss {loss:.4f})") 
+        """Train router nets for every internal node that has enough data.
+
+        This implementation trains *all* eligible nodes – not just the first
+        batch – by looping until the training buffer no longer contains any
+        node that satisfies the criteria.  It therefore reaches deeper levels
+        of the tree that only accumulate a sufficient number of examples
+        after their parent has split.
+        """
+
+        total_trained_nodes = 0
+        total_samples = 0
+
+        while True:
+            nodes_to_train = []
+
+            # Identify nodes that are ready for training
+            for node, examples in list(self._training_buffer.items()):
+                if (
+                    node in self._trained_nodes
+                    or len(examples) < self.min_train_samples
+                    or len(node.entries) <= 1
+                ):
+                    continue
+
+                # Prepare data – filter out samples that reference a child
+                # index that no longer exists (node was split after the sample
+                # was recorded).
+                xs = []
+                child_ids = []
+                for x_vec, cid in examples:
+                    if cid < len(node.entries):
+                        xs.append(x_vec)
+                        child_ids.append(cid)
+
+                if len(xs) < self.min_train_samples:
+                    continue
+
+                # Need at least two different children to be learnable
+                if len(set(child_ids)) < 2:
+                    continue
+
+                nodes_to_train.append((node, np.array(xs), child_ids))
+
+            if not nodes_to_train:
+                break  # Nothing new to train – we are done
+
+            # Actually train the selected nodes
+            for node, xs_arr, child_ids in nodes_to_train:
+                try:
+                    net = RouterNet(len(node.entries), self.router_hidden_size, self.router_depth)
+                    ds = _BasicRouterDS(xs_arr, child_ids)
+                    loss = _train_router_basic(net, ds, epochs=self.router_epochs, device=self.device)
+                    node.router = (net, self.router_top_k, self.device)
+                    self._trained_nodes.add(node)
+                    total_samples += len(child_ids)
+                    total_trained_nodes += 1
+                except Exception as e:
+                    print(f"[BasicNN] training error on node {id(node)}: {e}")
+
+            # Remove the examples of the nodes we have just trained but keep
+            # the rest so that deeper nodes can accumulate more data.
+            for node, _xs, _cids in nodes_to_train:
+                self._training_buffer.pop(node, None)
+
+        if total_trained_nodes:
+            avg_loss_str = f"{loss:.4f}" if 'loss' in locals() else "-"
+            print(
+                f"[BasicNN] trained {total_trained_nodes} routers with {total_samples} samples (avg CE loss {avg_loss_str})"
+            ) 

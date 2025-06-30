@@ -185,8 +185,6 @@ class RTreeBase(Generic[T]):
         :return: Iterable of matching nodes
         """
         fn = _yield_if_leaf if leaves else _yield_node
-        # Increment node access counter
-        self.node_accesses += 1
         yield from self.traverse(fn, condition)
 
     def perform_node_split(self, node: RTreeNode[T], group1: List[RTreeEntry[T]], group2: List[RTreeEntry[T]])\
@@ -250,15 +248,15 @@ class RTreeBase(Generic[T]):
         :param condition: Optional condition function to evaluate on each node. If condition returns False, then neither
             the node nor any of its descendants will be traversed. If not passed in, all nodes will be traversed.
         """
-        # Don't increment node access counter here to avoid double counting
-        # The counter is already incremented in search_nodes
-        
         if condition is not None and not condition(node):
             return
         yield from fn(node)
         if not node.is_leaf:
             for entry in node.entries:
                 yield from self.traverse_node(entry.child, fn, condition)
+        # Increment node access counter here so that **every** node actually visited during a traversal is counted.
+        # This enables meaningful pruning statistics when comparing different R-Tree variants.
+        self.node_accesses += 1
 
     def traverse_level_order(self, fn: Callable[[RTreeNode[T], int], Iterable[TResult]],
                              condition: Optional[Callable[[RTreeNode[T]], bool]] = None) -> Iterable[TResult]:

@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from typing import List, Tuple, Dict, Any
+import torch
 
 # Add parent directory to path to ensure we use the local package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,7 +28,7 @@ except ImportError:
 
 # Constants for the experiment
 CAPACITY = 16  # Maximum capacity of R-tree nodes
-MAX_POINTS = 100  # Maximum number of points to use from Twitter dataset
+MAX_POINTS = 1000  # Maximum number of points to use from Twitter dataset
 
 # Toggle this flag to include or exclude the (heavier) Fisher-Flow R-Tree benchmark.
 INCLUDE_FFM = False
@@ -134,7 +135,7 @@ def query_and_measure(tree, rects):
     query_time = (time.time() - t0) / len(rects) * 1000
     
     # Return node access count along with other metrics
-    return results, query_time, hit_counts, tree.node_accesses
+    return results, query_time, hit_counts, tree.node_accesses / len(rects)
 
 def visualize_rtree(tree, pts, rect, results, title=None):
     """Visualize an R-tree structure with query rectangle and results."""
@@ -336,11 +337,9 @@ def main():
         
         # Make sure we got enough points
         if len(valid_points) >= 5:  # Need at least some reasonable number of points
-            # Normalize the points to a reasonable coordinate space
-            pts = normalize_points(valid_points)
-            
+            pts = valid_points
             # Display some sample points
-            print(f"Sample points after normalization: {pts[:5]}")
+            print(f"Sample points: {pts[:5]}")
     except Exception as e:
         print(f"Error loading Twitter data with primary method: {str(e)}")
     
@@ -354,11 +353,9 @@ def main():
                 print(f"Simple parser found {len(valid_points)} valid points")
                 
                 if len(valid_points) >= 100:
-                    # Normalize the points to a reasonable coordinate space
-                    pts = normalize_points(valid_points)
-                    
+                    pts = valid_points
                     # Display some sample points
-                    print(f"Sample points after normalization (simple parser): {pts[:5]}")
+                    print(f"Sample points (simple parser): {pts[:5]}")
         except Exception as e:
             print(f"Error using simple parser: {str(e)}")
     
@@ -370,37 +367,35 @@ def main():
         valid_points = filter_valid_points(raw_points)
         print(f"Created {len(valid_points)} synthetic points")
         
-        # Normalize the points to a reasonable coordinate space
-        pts = normalize_points(valid_points)
-        
+        pts = valid_points
         # Display some sample points
-        print(f"Sample synthetic points after normalization: {pts[:5]}")
+        print(f"Sample synthetic points: {pts[:5]}")
     
     # Generate queries of different sizes
     # Use percentages of the total coordinate space to define query sizes
-    small_queries = sample_rects(pts, 1, 0.01, 0.01)  # Small (1% of coordinate space)
-    medium_queries = sample_rects(pts, 1, 0.05, 0.05)  # Medium (5% of coordinate space)
-    large_queries = sample_rects(pts, 1, .2, .2)  # Large (20% of coordinate space)
+    small_queries = sample_rects(pts, 100, 0.01, 0.01)  # Small (1% of coordinate space)
+    medium_queries = sample_rects(pts, 100, 0.05, 0.05)  # Medium (5% of coordinate space)
+    large_queries = sample_rects(pts, 100, .2, .2)  # Large (20% of coordinate space)
     
     # Combine all queries
     all_queries = small_queries + medium_queries + large_queries
-    print(f"Generated {len(all_queries)} queries of varying sizes")
+    # print(f"Generated {len(all_queries)} queries of varying sizes")
     
     # Print all data points for manual verification
-    print("\n===== ALL DATA POINTS =====")
-    for i, (x, y) in enumerate(pts):
-        print(f"Point {i}: ({x:.6f}, {y:.6f})")
+    # print("\n===== ALL DATA POINTS =====")
+    # for i, (x, y) in enumerate(pts):
+    #     print(f"Point {i}: ({x:.6f}, {y:.6f})")
         
     # Print all query rectangles
-    print("\n===== ALL QUERY RECTANGLES =====")
-    for i, (xmin, ymin, xmax, ymax) in enumerate(all_queries):
-        print(f"Query {i}: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
-        # Calculate which points should be in this rectangle
-        matching_pts = []
-        for j, (x, y) in enumerate(pts):
-            if xmin <= x <= xmax and ymin <= y <= ymax:
-                matching_pts.append(j)
-        print(f"  Expected matches: {matching_pts}")
+    # print("\n===== ALL QUERY RECTANGLES =====")
+    # for i, (xmin, ymin, xmax, ymax) in enumerate(all_queries):
+    #     print(f"Query {i}: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
+    #     # Calculate which points should be in this rectangle
+    #     matching_pts = []
+    #     for j, (x, y) in enumerate(pts):
+    #         if xmin <= x <= xmax and ymin <= y <= ymax:
+    #             matching_pts.append(j)
+    #     print(f"  Expected matches: {matching_pts}")
     
     # Build trees
     print("\nBuilding R-trees...")
@@ -408,13 +403,20 @@ def main():
     rstar, rstar_time = build_rtree(pts, RStarTree, max_entries=CAPACITY)
     
     # Fisher-Flow benchmark disabled; build only BasicNN-augmented tree
-    bnn, bnn_time = build_rtree(pts, BasicNNRTree,
-                                max_entries=CAPACITY,
-                                min_train_samples=100,
-                                router_hidden_size=32,
-                                router_depth=1,
-                                router_epochs=10,
-                                router_top_k=1)
+    bnn, bnn_time = build_rtree(
+        pts,
+        BasicNNRTree,
+        max_entries=CAPACITY,
+        min_train_samples=30,
+        router_hidden_size=32,
+        router_depth=2,
+        router_epochs=50,
+        router_top_k=3,
+        training_enabled=True,   # collect training samples during insertion
+    )
+
+    # Ensure all routers are trained once at the end (may retrain root with full data)
+    bnn._train_routers()
     
     print(f"Build times (ms): Classic={rtree_time:.2f}, R*={rstar_time:.2f}, BasicNN={bnn_time:.2f}")
     
@@ -426,50 +428,19 @@ def main():
     
     print(f"Query times (ms/query): Classic={rtree_query_time:.2f}, R*={rstar_query_time:.2f}, BasicNN={bnn_query_time:.2f}")
     
-    # Print detailed query results for each tree implementation
-    print("\n===== DETAILED QUERY RESULTS =====")
-    for i, ((xmin, ymin, xmax, ymax), rtree_res, rstar_res, bnn_res) in enumerate(zip(all_queries, rtree_results, rstar_results, bnn_results)):
-        print(f"\nQuery {i}: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
-        
-        # Print the result IDs from each implementation
-        rtree_ids = sorted([e.data for e in rtree_res])
-        rstar_ids = sorted([e.data for e in rstar_res])
-        bnn_ids = sorted([e.data for e in bnn_res])
-        
-        print(f"  Classic R-tree results: {rtree_ids}")
-        print(f"  R*-tree results: {rstar_ids}")
-        print(f"  BasicNN-tree results: {bnn_ids}")
-        
-        # Calculate differences between implementations
-        if rtree_ids != rstar_ids:
-            rstar_missing = set(rtree_ids) - set(rstar_ids)
-            rstar_extra = set(rstar_ids) - set(rtree_ids)
-            print(f"  R* differences: missing={rstar_missing}, extra={rstar_extra}")
-        
-        if rtree_ids != bnn_ids:
-            bnn_missing = set(rtree_ids) - set(bnn_ids)
-            bnn_extra = set(bnn_ids) - set(rtree_ids)
-            print(f"  BasicNN differences: missing={bnn_missing}, extra={bnn_extra}")
-    
     # Calculate query hit statistics
     rtree_total_hits = sum(rtree_hits)
     rstar_total_hits = sum(rstar_hits)
     bnn_total_hits = sum(bnn_hits)
     
-    print(f"\nTotal query hits: Classic={rtree_total_hits}, R*={rstar_total_hits}, BasicNN={bnn_total_hits}")
+    print(f"\nTotal query hits: Classic={rtree_total_hits}, R*={rstar_total_hits}")
     
-    # Report node access counts and pruning efficiency
-    print(f"\nNode accesses: Classic={rtree_node_accesses}, R*={rstar_node_accesses}, BasicNN={bnn_node_accesses}")
+    # Already averages – just rename for clarity
+    rtree_access_avg = rtree_node_accesses
+    rstar_access_avg = rstar_node_accesses
+    bnn_access_avg   = bnn_node_accesses
     
-    # Calculate pruning efficiency (% of nodes pruned compared to Guttman)
-    total_nodes = len(list(rtree.get_nodes()))
-    rstar_pruning = (1 - rstar_node_accesses / rtree_node_accesses) * 100
-    bnn_pruning = (1 - bnn_node_accesses / rtree_node_accesses) * 100
-    
-    print(f"Pruning efficiency: R*={rstar_pruning:.2f}%, BasicNN={bnn_pruning:.2f}%")
-    print(f"Total tree nodes: {total_nodes}")
-    
-    # Show hits per query type
+    # Show hits by query type
     n_small = len(small_queries)
     n_medium = len(medium_queries)
     
@@ -496,8 +467,8 @@ def main():
     
     # Compare tree structures
     fig, _ = compare_rtree_structures(
-        [rtree, rstar, bnn],
-        ["Guttman", "R*", "BasicNN"],
+        [rtree, rstar],
+        ["Guttman", "R*"],
         level=1
     )
     fig.savefig("twitter_rtree_structure_comparison_level1.png")
@@ -513,7 +484,6 @@ def main():
             # Query each implementation for this rectangle
             rtree_res = list(rtree.query(rect_obj))
             rstar_res = list(rstar.query(rect_obj))
-            bnn_res = list(bnn.query(rect_obj))
             
             # Visualize query results
             visualize_rtree(rtree, pts, rect, rtree_res, "Guttman RTree Query")
@@ -521,9 +491,6 @@ def main():
             
             visualize_rtree(rstar, pts, rect, rstar_res, "R* Tree Query")
             plt.savefig("twitter_rstar_query.png")
-            
-            visualize_rtree(bnn, pts, rect, bnn_res, "BasicNN RTree Query")
-            plt.savefig("twitter_bnn_query.png")
             
             print("Saved query visualizations")
             results_found = True
@@ -547,10 +514,14 @@ def main():
     print(f"{'RStarTree':20} {rstar_query_time:.2f}")
     print(f"{'BasicNNRTree':20} {bnn_query_time:.2f}")
     
-    print("\nNode Accesses:")
-    print(f"{'RTree (Guttman)':20} {rtree_node_accesses}")
-    print(f"{'RStarTree':20} {rstar_node_accesses}")
-    print(f"{'BasicNNRTree':20} {bnn_node_accesses}")
+    print("\nNode Accesses per query:")
+    print(f"{'RTree (Guttman)':20} {rtree_access_avg:.2f}")
+    print(f"{'RStarTree':20} {rstar_access_avg:.2f}")
+    print(f"{'BasicNNRTree':20} {bnn_access_avg:.2f}")
+    
+    # pruning efficiency stays the same whether we use totals or averages
+    rstar_pruning = (1 - rstar_access_avg / rtree_access_avg) * 100
+    bnn_pruning   = (1 - bnn_access_avg   / rtree_access_avg) * 100
     
     print("\nPruning Efficiency (% nodes pruned vs Guttman):")
     print(f"{'RTree (Guttman)':20} 0.00% (reference)")

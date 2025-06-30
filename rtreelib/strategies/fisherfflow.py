@@ -548,4 +548,144 @@ class FisherFlowRTree(RTreeBase[T]):
         
     def disable_training(self):
         """Disable router training"""
-        self._is_training_enabled = False 
+        self._is_training_enabled = False
+
+    # ------------------------------------------------------------------
+    # Router-guided query
+    # ------------------------------------------------------------------
+    def query(self, loc: Location):  # type: ignore[override]
+        """Perform a location query using the learned routers (if available).
+
+        The traversal strategy is:
+        1.  If an internal node has an attached router, query the router and
+            follow at most *top-k* children predicted with the highest score.
+            This can dramatically reduce the number of nodes visited.
+        2.  If no router is available (or the router fails), fall back to the
+            classical exhaustive traversal used in :pyclass:`RTreeBase`.
+
+        The method keeps *exact* result correctness **as long as** the router
+        is able to route queries to all relevant sub-trees.  If the router is
+        wrong, fewer results may be returned.  Benchmarks can therefore trade
+        off accuracy vs. pruning by tuning *router_top_k* (k=1 for
+        :pyclass:`BasicNNRTree`, k>1 for :pyclass:`FisherFlowRTree`).
+        """
+
+        # Local import to avoid circular deps
+        from rtreelib.models import get_loc_intersection_fn, Point  # type: ignore
+
+        intersects = get_loc_intersection_fn(loc)
+
+        # Helper to obtain a representative (x,y) from any Location type
+        def _centroid(lc: Location):
+            if isinstance(lc, Rect):
+                return lc.centroid()
+            if isinstance(lc, (tuple, list)) and len(lc) >= 2:
+                return lc[0], lc[1]
+            if isinstance(lc, Point):
+                return lc.x, lc.y
+            # Fallback: centre of global bounds
+            return 0.0, 0.0
+
+        stack = [self.root]
+        while stack:
+            node = stack.pop()
+            # Count every node we actually examine
+            self.node_accesses += 1
+
+            # Quick pruning using the node MBR. Empty nodes do not contribute.
+            mbr = node.get_bounding_rect()
+            if mbr is None or not intersects(mbr):
+                continue
+
+            if node.is_leaf:
+                # Evaluate all entries inside this leaf, skipping placeholders (data is None)
+                for e in node.entries:
+                    if e.data is not None and intersects(e.rect):
+                        yield e
+            else:
+                # Quick geometry-based shortcut: if exactly one child MBR fully
+                # contains the query rectangle we can descend there directly
+                # without consulting the router.  This happens often for point
+                # and very small range queries and saves one level worth of
+                # node visits.
+                if isinstance(loc, Rect):
+                    containing = [entry.child for entry in node.entries if (
+                        entry.rect.min_x <= loc.min_x and entry.rect.max_x >= loc.max_x and
+                        entry.rect.min_y <= loc.min_y and entry.rect.max_y >= loc.max_y
+                    )]
+                    if len(containing) == 1:
+                        stack.append(containing[0])
+                        continue
+
+                used_router = False
+                if (
+                    hasattr(node, "router") and node.router and node.router[0] is not None
+                    and len(node.entries) > 0
+                ):
+                    try:
+                        cx, cy = _centroid(loc)
+                        device = node.router[2]
+                        coords = torch.tensor(
+                            [[(cx - XMIN) / (XMAX - XMIN), (cy - YMIN) / (YMAX - YMIN)]],
+                            device=device,
+                            dtype=torch.float32,
+                        )
+
+                        # Lazily create / fetch the cached t-zero tensor
+                        if len(node.router) == 3:
+                            node.router += (
+                                torch.zeros((1, 1), device=device, dtype=torch.float32),
+                            )
+                        t_zero = node.router[3]
+
+                        with torch.no_grad():
+                            logits = node.router[0](coords, t_zero)
+
+                        # Convert to probabilities for confidence filtering
+                        probs = torch.softmax(logits, 1)[0]
+                        max_p = probs.max().item()
+
+                        base_k = max(1, int(node.router[1]))
+
+                        # dynamic enlargement for large queries (same formula as before)
+                        if isinstance(loc, Rect):
+                            q_area = max(0.0, (loc.max_x - loc.min_x) * (loc.max_y - loc.min_y))
+                            mbr_area = (mbr.max_x - mbr.min_x) * (mbr.max_y - mbr.min_y)
+                            if mbr_area > 0:
+                                area_ratio = min(1.0, q_area / mbr_area)
+                                base_k = max(base_k, math.ceil(area_ratio * len(node.entries)))
+
+                        base_k = min(len(node.entries), base_k)
+
+                        # Confidence threshold τ
+                        tau = 0.25
+                        cand = [i for i, p in enumerate(probs.tolist()) if p >= tau * max_p]
+
+                        # If too many candidates keep the best base_k by probability
+                        if len(cand) > base_k:
+                            cand = sorted(cand, key=lambda idx: probs[idx], reverse=True)[:base_k]
+
+                        # If no candidate passes the threshold fall back to top-k probabilities
+                        if not cand:
+                            cand = torch.topk(probs, base_k).indices.tolist()
+
+                        best_idx = cand
+
+                        # Push predicted children that could actually contribute. We apply
+                        # the same inexpensive MBR-intersection test that the exhaustive
+                        # traversal uses so that obviously irrelevant branches are skipped.
+                        for idx in reversed(best_idx):
+                            entry = node.entries[idx]
+                            if intersects(entry.rect):
+                                stack.append(entry.child)
+
+                        used_router = True
+                    except Exception:
+                        # Router failed → fall back to exhaustive traversal
+                        used_router = False
+
+                if not used_router:
+                    # Classical traversal: push every child that intersects the query
+                    for entry in node.entries:
+                        if intersects(entry.rect):
+                            stack.append(entry.child) 
